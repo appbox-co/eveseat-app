@@ -1,4 +1,46 @@
-# Releasing eveseat 5.0.1-5
+# Releasing eveseat 5.0.1-6
+
+5.0.1-6 is the released 5.0.1-5 image
+(`repo.cylo.net/eveseat@sha256:5fdb93052c1d27f8e30722fbdf337632340ce0f0902771fb239d93ba5f6783f6`)
+with `/entrypoint.sh` and the release tree's `AppboxSdeUpdater.php` replaced
+(see `Dockerfile.release`).
+
+Why: CCP's EVE static data build 3720952 (19 November 2026) has a type name of
+161 characters (type 96196), longer than the `VARCHAR(150)` SeAT's
+`InvTypesSeeder` creates, so strict MariaDB rejects the import. The import runs
+from `/entrypoint.sh` whenever a container is created, its failure was fatal,
+and the seeders rebuild their tables outside any transaction. The 5.0.1-5
+canary (seat.nullsec, 19 November 2026) restarted in a loop with `invTypes`
+left at 50,000 of 53,941 rows. The monthly scheduled import (1st of the month,
+00:00) would have left the same partial table on running installs.
+
+- `/entrypoint.sh` patches the persisted tree on every start, only where the
+  files are exactly the known versions: it installs the fixed updater over the
+  5.0.1-2 Appbox updater (sha256 `c440615b...`) and widens the seeder's
+  `typeName` to 255 characters (also for installs whose plugins replaced
+  `vendor/eveseat` and run SeAT's own SDE command). The release marker stays
+  the same, because re-applying a release replaces `vendor/` and would remove
+  customer-installed plugins.
+- When the import still fails or times out, `/entrypoint.sh` restores the
+  updater's copies of the static-data tables and starts SeAT on the previous
+  data. Only an install without any static data still stops with an error.
+- `AppboxSdeUpdater.php` copies the 10 static-data tables before an import,
+  puts them back when the import fails (and at the start of the next run after
+  an interrupted one), and logs the database driver's message, such as
+  `Data too long for column 'typeName'`, instead of only the exception class.
+
+The gate is `release/verify-sde-overlay.sh`: the overlay checks of
+`verify-overlay.sh` (with `.php` overlay files checked as mode 644 and
+`php -l`), and `release/sde-import-test.sh` against CCP's current static data
+on the new image (must pass: fresh import, recreate without re-import, and an
+import killed while seeding keeps the previous tables) and on the base image
+(must fail with the import error). It needs internet on the builder.
+
+Build, gate and push from a clean checkout of branch `sde-import-fix`:
+
+    CYLO_BUILD_TMP=<scratch dir> release/build-on-builder.sh release
+
+# Releasing eveseat 5.0.1-5 (previous release)
 
 5.0.1-5 is the released 5.0.1-4 image
 (`repo.cylo.net/eveseat@sha256:7474bd7a45eb159fec1727b2f77953e3a71920c07a662b584ca4a8307c768a86`)

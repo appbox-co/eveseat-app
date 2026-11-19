@@ -1,43 +1,29 @@
-# SeAT 5.0.1-5: the released 5.0.1-4 image (repo.cylo.net/eveseat:5.0.1-4)
-# with PHP replaced by PHP 8.2.36, the release with the security fixes of
-# 19 November 2026. 5.0.1-4 carried PHP 8.2.35 (the 21 October fixes) and
-# the startup fixes; those, SeAT and everything else stay as released.
+# SeAT 5.0.1-6: the released 5.0.1-5 image (repo.cylo.net/eveseat:5.0.1-5,
+# PHP 8.2.36) with two files replaced and nothing else changed.
 #
-# The new PHP comes from
-# repo.cylo.net/php-artifacts:docker-library-php-8.2.36-fpm-bookworm, a
-# FROM-scratch artifact holding the /usr/local tree of PHP 8.2.36 built with
-# the unmodified docker-library/php 8.2/bookworm/fpm recipe (the recipe behind
-# the official image; see release/php-artifact/). Only the files PHP's own
-# build installs there are copied in: the CLI and FPM binaries, php-config,
-# phpize, the headers, the build files and the shared extensions the recipe
-# ships (opcache, sodium). The extensions SeAT compiled for PHP 8.2 (same
-# module API, 20220829), the PHP and FPM configuration in /usr/local/etc, and
-# SeAT itself stay exactly as released. This is how 5.0.1-3 replaced PHP in
-# 5.0.1-2 (see the git history of this file).
+# CCP's EVE static data build 3720952 (19 November 2026) has a type name of
+# 161 characters, longer than the 150 SeAT's InvTypesSeeder allows, so strict
+# MariaDB rejects the import. The import ran from /entrypoint.sh on every
+# container (re)creation and its failure was fatal, so an updated SeAT
+# restarted forever; the monthly scheduled run would also have left invTypes
+# partial on running installs.
+#
+# - /entrypoint.sh (scripts/Entrypoint.sh) patches the persisted SeAT tree on
+#   every start, only where the files are exactly the known versions: it
+#   installs the fixed updater over the 5.0.1-2 Appbox updater and widens
+#   invTypes.typeName to 255 characters. If an import still fails or times
+#   out, it restores the previous static-data tables and starts SeAT on them
+#   instead of exiting; only an install without any static data stays fatal.
+# - The release tree's AppboxSdeUpdater.php (scripts/AppboxSdeUpdater.php)
+#   copies the static-data tables before an import, puts them back when the
+#   import fails, and logs the database driver's error (no SQL or values)
+#   instead of only the exception class.
 #
 # SEAT_IMAGE_VERSION and SEAT_IMAGE_REVISION are inherited unchanged on
-# purpose: Entrypoint.sh uses the revision as its release marker, so earlier
-# installs do not re-apply the application tree when they move to 5.0.1-5.
-#
-# PHP_IMAGE is pinned by digest. A trial build may override PHP_VERSION and
-# PHP_IMAGE with another PHP image (release/build-on-builder.sh trial).
+# purpose: re-applying a release replaces vendor/ in the persisted tree, which
+# would remove customer-installed plugins.
 
-ARG PHP_VERSION=8.2.36
-ARG PHP_IMAGE=repo.cylo.net/php-artifacts:docker-library-php-8.2.36-fpm-bookworm@sha256:cfc381fd9d3a099c210cec0799056afc612f985bb1dc4f3dc249a96b63a2862b
-ARG PHP_EXTENSION_DIR=/usr/local/lib/php/extensions/no-debug-non-zts-20220829
+FROM repo.cylo.net/eveseat@sha256:5fdb93052c1d27f8e30722fbdf337632340ce0f0902771fb239d93ba5f6783f6
 
-FROM ${PHP_IMAGE} AS patched-php
-
-FROM repo.cylo.net/eveseat@sha256:7474bd7a45eb159fec1727b2f77953e3a71920c07a662b584ca4a8307c768a86
-ARG PHP_VERSION
-ARG PHP_IMAGE
-ARG PHP_EXTENSION_DIR
-
-COPY --from=patched-php /usr/local/bin/php /usr/local/bin/php-config /usr/local/bin/phpize /usr/local/bin/
-COPY --from=patched-php /usr/local/sbin/php-fpm /usr/local/sbin/
-COPY --from=patched-php /usr/local/include/php/ /usr/local/include/php/
-COPY --from=patched-php /usr/local/lib/php/build/ /usr/local/lib/php/build/
-COPY --from=patched-php ${PHP_EXTENSION_DIR}/ ${PHP_EXTENSION_DIR}/
-
-ENV PHP_VERSION=${PHP_VERSION}
-LABEL org.appbox.php-source=${PHP_IMAGE}
+COPY --chmod=755 scripts/Entrypoint.sh /entrypoint.sh
+COPY --chmod=644 scripts/AppboxSdeUpdater.php /opt/seat-preinstall/seat/vendor/eveseat/eveapi/src/Commands/Eve/Update/AppboxSdeUpdater.php

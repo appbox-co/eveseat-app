@@ -2,6 +2,7 @@
 
 namespace Seat\Eveapi\Commands\Eve\Update;
 
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Seat\Services\Settings\Seat;
@@ -16,6 +17,11 @@ final class AppboxSdeUpdater
         'invGroups', 'invMarketGroups', 'invMetaGroups',
     ];
     private const LOCATIONS = ['regions', 'constellations', 'solar_systems', 'mapDenormalize', 'staStations'];
+    // Copies of TABLES taken before an import. The CCP seeders drop, recreate and
+    // refill each table outside any transaction, so a failed import would otherwise
+    // leave partial tables behind. /entrypoint.sh restores the same copies when an
+    // import is killed by its timeout.
+    private const SNAPSHOT_PREFIX = 'appbox_sde_prev_';
 
     public function run(Sde $command): int
     {
@@ -26,6 +32,9 @@ final class AppboxSdeUpdater
         }
 
         try {
+            // Copies left by an interrupted import hold the last complete data.
+            $this->restoreSnapshots();
+
             // The CCP seeder does not supply SeAT's legacy location tables.
             // Only bootstrap these when absent; never overwrite current CCP types on a refresh.
             if (! $this->tablesReady(self::LOCATIONS)) {
@@ -53,30 +62,87 @@ final class AppboxSdeUpdater
             $command->info('Importing CCP EVE static data build ' . $build . '.');
             // Assign at runtime: Laravel's cached configuration must not freeze the latest build.
             config(['eveapi.config.sde.version' => $build]);
-            $result = $command->call('db:seed', [
-                '--class' => 'Seat\\Eveapi\\Database\\Seeders\\CcpSdeSeeder',
-                '--force' => true,
-                '--no-interaction' => true,
-            ]);
-            if ($result !== 0 || ! $this->tablesReady(self::TABLES)) {
-                throw new RuntimeException('CCP EVE static-data import did not populate all required tables.');
-            }
+            $this->takeSnapshots();
+            try {
+                $result = $command->call('db:seed', [
+                    '--class' => 'Seat\\Eveapi\\Database\\Seeders\\CcpSdeSeeder',
+                    '--force' => true,
+                    '--no-interaction' => true,
+                ]);
+                if ($result !== 0 || ! $this->tablesReady(self::TABLES)) {
+                    throw new RuntimeException('CCP EVE static-data import did not populate all required tables.');
+                }
 
-            $typeCount = self::countTypes(storage_path('sde/types.jsonl'));
-            if ($typeCount !== (int) DB::table('invTypes')->count()) {
-                throw new RuntimeException('Imported EVE type count does not match the CCP source.');
+                $typeCount = self::countTypes(storage_path('sde/types.jsonl'));
+                if ($typeCount !== (int) DB::table('invTypes')->count()) {
+                    throw new RuntimeException('Imported EVE type count does not match the CCP source.');
+                }
+            } catch (\Throwable $importError) {
+                if ($this->restoreSnapshots()) {
+                    $command->warn('Restored the previous EVE static data after the failed import.');
+                }
+                throw $importError;
             }
+            $this->dropSnapshots();
             // Record completion only after import and independent database verification.
             Seat::set('appbox_installed_ccp_sde', $build);
             $command->info('CCP EVE static data verified: build ' . $build . ', ' . $typeCount . ' types.');
             return 0;
         } catch (\Throwable $error) {
-            // Database exceptions may include SQL values. Do not publish customer data in cron logs.
-            $command->error('EVE static-data update failed (' . get_class($error) . '); completion was not recorded.');
+            $command->error('EVE static-data update failed (' . self::describe($error) . '); completion was not recorded.');
             return 1;
         } finally {
             flock($lock, LOCK_UN);
             fclose($lock);
+        }
+    }
+
+    /**
+     * The driver's own message for database errors: it names the failing column or
+     * constraint but, unlike QueryException's message, carries no SQL or bound values.
+     */
+    private static function describe(\Throwable $error): string
+    {
+        $message = $error instanceof QueryException && $error->getPrevious() !== null
+            ? $error->getPrevious()->getMessage()
+            : $error->getMessage();
+        $message = preg_replace('/\s+/', ' ', $message) ?? '';
+        return get_class($error) . ': ' . mb_substr($message, 0, 300);
+    }
+
+    private function takeSnapshots(): void
+    {
+        $this->dropSnapshots();
+        foreach (self::TABLES as $table) {
+            if (! Schema::hasTable($table)) {
+                continue;
+            }
+            $copy = self::SNAPSHOT_PREFIX . $table;
+            DB::statement('CREATE TABLE `' . $copy . '` LIKE `' . $table . '`');
+            DB::statement('INSERT INTO `' . $copy . '` SELECT * FROM `' . $table . '`');
+        }
+    }
+
+    /** Put every snapshot back in place of its table. Returns whether any existed. */
+    private function restoreSnapshots(): bool
+    {
+        $restored = false;
+        foreach (self::TABLES as $table) {
+            $copy = self::SNAPSHOT_PREFIX . $table;
+            if (! Schema::hasTable($copy)) {
+                continue;
+            }
+            DB::statement('DROP TABLE IF EXISTS `' . $table . '`');
+            DB::statement('RENAME TABLE `' . $copy . '` TO `' . $table . '`');
+            $restored = true;
+        }
+        return $restored;
+    }
+
+    private function dropSnapshots(): void
+    {
+        foreach (self::TABLES as $table) {
+            DB::statement('DROP TABLE IF EXISTS `' . self::SNAPSHOT_PREFIX . $table . '`');
         }
     }
 

@@ -35,6 +35,14 @@ MYSQL_WAIT_TIMEOUT_SECONDS=${MYSQL_WAIT_TIMEOUT_SECONDS:-900}
 # web server before giving up until the next container start.
 CALLBACK_READY_TIMEOUT_SECONDS=${CALLBACK_READY_TIMEOUT_SECONDS:-3600}
 [[ "${CALLBACK_READY_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]{0,5}$ ]] || CALLBACK_READY_TIMEOUT_SECONDS=3600
+# The EVE static-data updater in this image's release tree (fixed in 5.0.1-6)
+# and the Appbox updater it replaces in persisted trees (5.0.1-2 to 5.0.1-5).
+APPBOX_SDE_UPDATER=${SEAT_RELEASE_DIR}/vendor/eveseat/eveapi/src/Commands/Eve/Update/AppboxSdeUpdater.php
+APPBOX_SDE_UPDATER_PREVIOUS_SHA256=c440615b795c2161aaa666113173a6fc8cac798281609b88c97790aee4ff7e7a
+# Tables the CCP seeders rebuild, and the prefix of the updater's copies of them.
+SDE_TABLES=(invTypes dgmTypeAttributes dgmTypeEffects chrFactions invCategories
+    invContrabandTypes invControlTowerResources invGroups invMarketGroups invMetaGroups)
+SDE_SNAPSHOT_PREFIX=appbox_sde_prev_
 TEMP_MYSQL_PID=""
 TEMP_REDIS_PID=""
 ADMIN_LOGIN_URL=""
@@ -78,6 +86,7 @@ require_inputs() {
     [[ -n "${ADMIN_PASS:-}" ]] || fatal "ADMIN_PASS must be provided"
     require_file "${SEAT_RELEASE_DIR}/artisan"
     require_file "${SEAT_RELEASE_DIR}/public/index.php"
+    require_file "${APPBOX_SDE_UPDATER}"
 }
 
 prepare_directories() {
@@ -550,12 +559,69 @@ sde_is_ready() {
         && [[ "${station_count}" -gt 0 ]]
 }
 
+# The persisted SeAT tree keeps the code of the release it was installed from,
+# and re-applying a release replaces vendor/ (plugins included). Patch the two
+# files the EVE static-data import needs in place instead, only when they are
+# exactly the known versions, on every start.
+patch_persisted_sde_code() {
+    local updater="${SEAT_APP_DIR}/vendor/eveseat/eveapi/src/Commands/Eve/Update/AppboxSdeUpdater.php"
+    local seeder="${SEAT_APP_DIR}/vendor/eveseat/eveapi/src/database/seeders/Sde/Ccp/InvTypesSeeder.php"
+    local current wanted
+
+    if [[ -f "${updater}" ]]; then
+        current="$(sha256sum < "${updater}" | cut -c1-64)"
+        wanted="$(sha256sum < "${APPBOX_SDE_UPDATER}" | cut -c1-64)"
+        if [[ "${current}" == "${APPBOX_SDE_UPDATER_PREVIOUS_SHA256}" ]]; then
+            install -o "${APP_UID}" -g "${APP_GID}" -m 644 "${APPBOX_SDE_UPDATER}" "${updater}"
+            log "Updated the EVE static-data updater: a failed import now keeps the previous data"
+        elif [[ "${current}" != "${wanted}" ]]; then
+            log "WARNING: ${updater} is not a known Appbox version; left unchanged"
+        fi
+    fi
+
+    # CCP's static data has type names longer than the 150 characters SeAT's
+    # seeder allows (161 in build 3720952), and strict MariaDB rejects them.
+    if [[ -f "${seeder}" ]] && php -r '
+        $file = $argv[1];
+        $old = "\$table->string(\x27typeName\x27, 150);";
+        $new = "\$table->string(\x27typeName\x27, 255);";
+        $source = file_get_contents($file);
+        if ($source === false || substr_count($source, $old) !== 1) {
+            exit(1);
+        }
+        exit(file_put_contents($file, str_replace($old, $new, $source)) === false ? 2 : 0);
+    ' "${seeder}"; then
+        log "Widened the EVE type name column to 255 characters for current CCP static data"
+    fi
+}
+
+# Put back the updater's copies of the static-data tables if an import was
+# killed before the updater could restore them itself.
+restore_sde_snapshots() {
+    local table copy exists restored=0
+    for table in "${SDE_TABLES[@]}"; do
+        copy="${SDE_SNAPSHOT_PREFIX}${table}"
+        exists="$(mysql_app --batch --skip-column-names --execute="SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE() AND table_name = '${copy}';")" || return 1
+        [[ "${exists}" == 1 ]] || continue
+        mysql_app --execute="DROP TABLE IF EXISTS \`${table}\`; RENAME TABLE \`${copy}\` TO \`${table}\`;" || return 1
+        restored=1
+    done
+    [[ "${restored}" == 0 ]] || log "Restored the previous EVE static data after the interrupted import"
+}
+
 ensure_sde() {
     log "Checking the current CCP EVE static-data build"
     if ! timeout "${SDE_UPDATE_TIMEOUT_SECONDS}" \
         gosu "${APP_UID}:${APP_GID}" \
         php "${SEAT_APP_DIR}/artisan" eve:update:sde --no-interaction; then
-        fatal "EVE SDE update failed or timed out after ${SDE_UPDATE_TIMEOUT_SECONDS} seconds"
+        restore_sde_snapshots || fatal "Unable to restore the EVE static data after a failed update"
+        if sde_is_ready; then
+            log "WARNING: EVE SDE update failed or timed out after ${SDE_UPDATE_TIMEOUT_SECONDS} seconds; SeAT keeps the previously imported static data"
+            return 0
+        fi
+        fatal "EVE SDE update failed or timed out after ${SDE_UPDATE_TIMEOUT_SECONDS} seconds and no previously imported static data is available"
     fi
 
     if ! sde_is_ready; then
@@ -696,6 +762,7 @@ main() {
             ;;
     esac
 
+    patch_persisted_sde_code
     ensure_laravel_dirs
     cd "${SEAT_APP_DIR}"
     ensure_env_file
