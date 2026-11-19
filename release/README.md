@@ -1,4 +1,29 @@
-# Releasing eveseat 5.0.1-4
+# Releasing eveseat 5.0.1-5
+
+5.0.1-5 is the released 5.0.1-4 image
+(`repo.cylo.net/eveseat@sha256:7474bd7a45eb159fec1727b2f77953e3a71920c07a662b584ca4a8307c768a86`)
+with PHP's own files copied in from
+`repo.cylo.net/php-artifacts:docker-library-php-8.2.36-fpm-bookworm`, the way
+5.0.1-3 replaced PHP in 5.0.1-2 (see `Dockerfile.release`). PHP 8.2.36
+carries the php-src security fixes of 19 November 2026. The 5.0.1-4 startup
+fixes and SeAT are unchanged.
+
+- The artifact recipe is docker-library/php 8f7cce49 `8.2/bookworm/fpm`,
+  which differs from the 8.2.35 recipe only in the PHP version, URL and
+  sha256 lines; `FROM` stays pinned to the same debian:bookworm-slim digest.
+- It was built directly on the dedicated builder (builder.grant) from the
+  pushed recipe commit, made into the artifact with `make-artifact.sh`, gated
+  with `verify-artifact.sh` and pushed. `artifact.env` records the
+  provenance.
+- The gate is `release/verify-image.sh` again, with 5.0.1-4 as the base.
+- `release/build-on-builder.sh` now targets builder.grant (port 12246) and
+  builds with `--builder default`.
+
+Build, gate and push from a clean checkout of branch `php-8.2.36`:
+
+    CYLO_BUILD_TMP=<scratch dir> release/build-on-builder.sh release
+
+# Releasing eveseat 5.0.1-4 (previous release)
 
 5.0.1-4 is the released 5.0.1-3 image
 (`repo.cylo.net/eveseat@sha256:57f8ee40267ae1ab29f39d1210c8812b5964e2a6ab926b5130731228cc331f76`)

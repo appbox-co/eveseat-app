@@ -27,11 +27,11 @@
 #       push, and print the pushed digest.
 set -euo pipefail
 
-builder_host=appbox@builder1.builder.appboxes.co
-builder_ssh=(ssh -p 10112 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
+builder_host=appbox@builder.grant.appboxes.co
+builder_ssh=(ssh -p 12246 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
     -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
     -o StrictHostKeyChecking=yes -o ServerAliveInterval=30)
-builder_scp=(scp -P 10112 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
+builder_scp=(scp -P 12246 -i /Users/rid/.ssh/appbox_ubuntuvps2_webtop
     -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10
     -o StrictHostKeyChecking=yes)
 
@@ -191,7 +191,7 @@ echo "builder directory $cylo_build_remote_dir"
 
 echo "== build $build_ref"
 "${builder_ssh[@]}" "$builder_host" "cd '$cylo_build_remote_dir/context' && \
-    { docker build --progress=plain --platform linux/amd64 -f '$cylo_build_dockerfile' $build_args \
+    { docker build --builder default --progress=plain --platform linux/amd64 -f '$cylo_build_dockerfile' $build_args \
         -t '$build_ref' . > ../build.log 2>&1 \
       || { tail -n 150 ../build.log; exit 1; }; } && \
     tail -n 30 ../build.log"
