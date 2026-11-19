@@ -159,16 +159,18 @@ log "recreated container serves without re-importing: $(app_serves)"
 log "step 3: an import interrupted while it seeds keeps the previous data"
 db "UPDATE global_settings SET value = '1' WHERE name = 'appbox_installed_ccp_sde'"
 start_app
+# Kill the import as soon as the largest table (dgmTypeAttributes, about
+# 650,000 rows) starts seeding: earlier tables are already rebuilt and that
+# one is dropped and half filled, so only a restore brings the data back.
 deadline=$(( $(date +%s) + 1800 ))
-until docker logs "$prefix-app" 2>&1 | grep -aq 'Seeding SDE into Database'; do
+until docker logs "$prefix-app" 2>&1 | grep -aq 'DgmTypeAttributesSeeder .*RUNNING'; do
     [ "$(docker inspect -f '{{.State.Status}}' "$prefix-app")" = running ] \
         || defect "the container exited before the import started seeding"
     [ "$(date +%s)" -lt "$deadline" ] || setup_fail "the import did not start seeding within 1800 seconds"
-    sleep 5
+    sleep 1
 done
-sleep 20
 docker exec "$prefix-app" pkill -f '[e]ve:update:sde' || setup_fail "no import process to interrupt"
-log "killed the import 20 seconds into seeding"
+log "killed the import while it seeded dgmTypeAttributes"
 wait_serving 1800 || defect "SeAT did not start after the interrupted import"
 app_logs | grep -q 'Restored the previous EVE static data' \
     || defect "the previous static data was not restored"
