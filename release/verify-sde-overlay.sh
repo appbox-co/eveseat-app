@@ -232,7 +232,7 @@ done
 echo "exit codes: new=${results[0]} base=${results[1]}"
 [ "${results[0]}" -eq 0 ] || fail "the new image failed the static-data test"
 [ "${results[1]}" -eq 1 ] || fail "the test did not reproduce the import failure on the base image (exit ${results[1]})"
-grep -q 'Data too long for column\|EVE SDE update failed' "$work_dir/test-base.log" \
+grep -q 'Data too long for column\|EVE SDE update failed\|EVE static-data update failed' "$work_dir/test-base.log" \
     || fail "the base image run did not show the import failure"
 echo "defect reproduced on the base image and fixed in the new image"
 
